@@ -129,39 +129,80 @@ async def get_existing_boards(page: Page) -> set:
     return names
 
 
+async def debug_page_elements(page: Page):
+    """Print all buttons/interactive elements on the current page for debugging."""
+    elements = await page.evaluate("""
+        () => {
+            const els = document.querySelectorAll(
+                'button, [role="button"], a, input, [data-test-id]'
+            );
+            return [...els].slice(0, 40).map(el => ({
+                tag:    el.tagName,
+                text:   el.textContent.trim().slice(0, 60),
+                aria:   el.getAttribute('aria-label'),
+                testId: el.getAttribute('data-test-id'),
+                href:   el.getAttribute('href'),
+                type:   el.getAttribute('type'),
+            }));
+        }
+    """)
+    print("\n  [DEBUG] Elements found on page:")
+    for el in elements:
+        print(f"    tag={el['tag']} testId={el['testId']!r} aria={el['aria']!r} text={el['text']!r}")
+    await page.screenshot(path="debug_screenshot.png")
+    print("  [DEBUG] Screenshot saved to debug_screenshot.png\n")
+
+
 async def create_board(page: Page, name: str) -> bool:
     try:
-        # Go to boards page and click the Create board button/tile
         await page.goto("https://www.pinterest.com/me/boards/", wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(3000)
 
-        # Click the "+" create board button (the empty tile or top-right button)
-        create_btn = page.locator(
-            '[data-test-id="create-board-button"], '
-            '[aria-label="Create board"], '
-            'div[data-test-id="board-create"], '
-            'button:has-text("Create board"), '
-            'a:has-text("Create board"), '
-            '[data-test-id="pwt-cleanslate"]'
-        ).first
-        await create_btn.click(timeout=8000)
-        await page.wait_for_timeout(1500)
+        # Try to click the create board button via JavaScript (handles dynamic selectors)
+        clicked = await page.evaluate("""
+            () => {
+                const candidates = [
+                    ...document.querySelectorAll('button, [role="button"], a, div, svg')
+                ];
+                for (const el of candidates) {
+                    const aria  = (el.getAttribute('aria-label') || '').toLowerCase();
+                    const testId = (el.getAttribute('data-test-id') || '').toLowerCase();
+                    const text  = (el.textContent || '').trim().toLowerCase();
+                    if (
+                        aria.includes('create board') || aria.includes('add board') ||
+                        testId.includes('create-board') || testId.includes('board-create') ||
+                        text === 'create board' || text === '+'
+                    ) {
+                        el.click();
+                        return aria || testId || text;
+                    }
+                }
+                return null;
+            }
+        """)
 
-        # Fill in board name in the modal
+        if not clicked:
+            print(f"  [!] Could not find Create Board button for '{name}'")
+            await debug_page_elements(page)
+            return False
+
+        print(f"  [*] Clicked create button ({clicked})")
+        await page.wait_for_timeout(2000)
+
+        # Fill in board name
         name_input = await page.wait_for_selector(
             'input[name="boardName"], input[id="boardEditName"], '
-            'input[placeholder*="oard"], input[placeholder*="Name"]',
+            'input[placeholder*="oard"], input[placeholder*="Name"], '
+            'input[type="text"]',
             timeout=8000
         )
         await name_input.click()
         await name_input.fill(name)
         await page.wait_for_timeout(500)
 
-        # Click Create / Done
+        # Submit
         submit = page.locator(
-            'button[type="submit"]:has-text("Create"), '
-            'button:has-text("Create"), '
-            'button:has-text("Done")'
+            'button[type="submit"], button:has-text("Create"), button:has-text("Done")'
         ).first
         await submit.click(timeout=6000)
         await page.wait_for_timeout(2000)

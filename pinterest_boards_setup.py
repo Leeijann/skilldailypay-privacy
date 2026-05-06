@@ -131,21 +131,39 @@ async def get_existing_boards(page: Page) -> set:
 
 async def create_board(page: Page, name: str) -> bool:
     try:
-        await page.goto("https://www.pinterest.com/board/create/", wait_until="domcontentloaded", timeout=20000)
+        # Go to boards page and click the Create board button/tile
+        await page.goto("https://www.pinterest.com/me/boards/", wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_timeout(2500)
+
+        # Click the "+" create board button (the empty tile or top-right button)
+        create_btn = page.locator(
+            '[data-test-id="create-board-button"], '
+            '[aria-label="Create board"], '
+            'div[data-test-id="board-create"], '
+            'button:has-text("Create board"), '
+            'a:has-text("Create board"), '
+            '[data-test-id="pwt-cleanslate"]'
+        ).first
+        await create_btn.click(timeout=8000)
         await page.wait_for_timeout(1500)
 
+        # Fill in board name in the modal
         name_input = await page.wait_for_selector(
-            'input[name="boardName"], input[placeholder*="Name"], input[id*="name"], input[type="text"]',
+            'input[name="boardName"], input[id="boardEditName"], '
+            'input[placeholder*="oard"], input[placeholder*="Name"]',
             timeout=8000
         )
         await name_input.click()
         await name_input.fill(name)
         await page.wait_for_timeout(500)
 
+        # Click Create / Done
         submit = page.locator(
-            'button[type="submit"], button:has-text("Create"), button:has-text("Done")'
+            'button[type="submit"]:has-text("Create"), '
+            'button:has-text("Create"), '
+            'button:has-text("Done")'
         ).first
-        await submit.click()
+        await submit.click(timeout=6000)
         await page.wait_for_timeout(2000)
 
         print(f"  [+] Created: {name}")

@@ -192,7 +192,8 @@ async def main():
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=False, slow_mo=80)
-        context = await browser.new_context(
+        session_file = Path(__file__).parent / "session_state.json"
+        ctx_kwargs = dict(
             viewport={"width": 1280, "height": 900},
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -200,14 +201,29 @@ async def main():
                 "Chrome/124.0.0.0 Safari/537.36"
             )
         )
-
-        # Load saved session
-        ok = await load_cookies(context)
-        if not ok:
-            await browser.close()
-            return
+        if session_file.exists():
+            ctx_kwargs["storage_state"] = str(session_file)
+        context = await browser.new_context(**ctx_kwargs)
 
         page = await context.new_page()
+
+        # Try saved session first, otherwise let user log in manually
+        session_file = Path(__file__).parent / "session_state.json"
+        if session_file.exists():
+            await context.storage_state()  # already loaded via new_context below
+            print(f"[+] Loaded saved session from {session_file.name}")
+        elif COOKIES_FILE.exists():
+            ok = await load_cookies(context)
+            if not ok:
+                await browser.close()
+                return
+        else:
+            print("[!] No saved session found — opening Pinterest for manual login.")
+            print("    Log in to your Pinterest account in the browser window,")
+            print("    then come back here and press ENTER to continue...")
+            await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded")
+            input("\n>>> Press ENTER after you have logged in to Pinterest: ")
+            print("[+] Continuing...")
 
         # Get existing boards
         try:

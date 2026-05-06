@@ -2,7 +2,7 @@
 SkillDailyPay — Pinterest Board Setup
 Silix LLC / skilldailypay.com
 
-Opens a browser window for you to log in to Pinterest, then automatically
+Opens a browser for you to log in to Pinterest, then automatically
 creates all missing boards for the SkillDailyPay multi-agency content system.
 
 Usage:
@@ -12,8 +12,9 @@ Usage:
 """
 
 import asyncio
+import shutil
 from pathlib import Path
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Page, BrowserContext
 
 SESSION_DIR = Path(__file__).parent / "pinterest_session"
 
@@ -72,33 +73,47 @@ BOARDS = [
 ]
 
 
-async def wait_for_login(page: Page):
-    """Navigate to Pinterest and wait until the user is logged in."""
-    await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded")
-    print("[!] Browser opened — please log in to Pinterest.")
-    print("    Waiting automatically, no ENTER needed...\n")
+def is_login_page(url: str) -> bool:
+    return "/login" in url or "/signup" in url or "accounts/login" in url
 
-    # Wait until we land on a page that is NOT the login/signup page
-    for _ in range(120):  # wait up to 2 minutes
+
+async def ensure_logged_in(page: Page):
+    """Go to Pinterest and wait until the user is confirmed logged in on /me/."""
+    print("[*] Checking login status...")
+
+    await page.goto("https://www.pinterest.com/me/boards/", wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_timeout(2000)
+
+    if not is_login_page(page.url):
+        print("[+] Already logged in.\n")
+        return
+
+    # Need to log in
+    print("[!] Not logged in — opening Pinterest login page.")
+    print("    Please log in to your Pinterest account in the browser.")
+    print("    The script will continue automatically once you are logged in...\n")
+
+    await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=20000)
+
+    # Poll until we land on a non-login page (up to 3 minutes)
+    for _ in range(180):
         await page.wait_for_timeout(1000)
-        url = page.url
-        if "pinterest.com" in url and "/login" not in url and "/signup" not in url:
+        if not is_login_page(page.url) and "pinterest.com" in page.url:
+            await page.wait_for_timeout(2000)
             print("[+] Login detected — continuing.\n")
             return
-    raise RuntimeError("Timed out waiting for Pinterest login (2 min limit).")
+
+    raise RuntimeError("Timed out waiting for Pinterest login (3 min). Please try again.")
 
 
 async def get_existing_boards(page: Page) -> set:
-    await page.goto("https://www.pinterest.com/me/", wait_until="networkidle", timeout=30000)
+    await page.goto("https://www.pinterest.com/me/boards/", wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(2000)
-
-    if "/login" in page.url or "/signup" in page.url:
-        raise RuntimeError("Not logged in — session may have expired.")
 
     # Scroll to load all boards
     for _ in range(8):
         await page.keyboard.press("End")
-        await page.wait_for_timeout(700)
+        await page.wait_for_timeout(600)
 
     board_els = await page.query_selector_all(
         '[data-test-id="board-card-title"], [data-test-id="boardName"], '
@@ -127,7 +142,9 @@ async def create_board(page: Page, name: str) -> bool:
         await name_input.fill(name)
         await page.wait_for_timeout(500)
 
-        submit = page.locator('button[type="submit"], button:has-text("Create"), button:has-text("Done")').first
+        submit = page.locator(
+            'button[type="submit"], button:has-text("Create"), button:has-text("Done")'
+        ).first
         await submit.click()
         await page.wait_for_timeout(2000)
 
@@ -143,41 +160,35 @@ async def main():
     print("  SkillDailyPay — Pinterest Board Setup")
     print("=" * 60 + "\n")
 
-    SESSION_DIR.mkdir(exist_ok=True)
+    # Clear stale session if it exists so we always get a clean login check
+    if SESSION_DIR.exists():
+        shutil.rmtree(SESSION_DIR)
+    SESSION_DIR.mkdir()
 
     async with async_playwright() as pw:
-        # Persistent context saves the login session automatically
         context = await pw.chromium.launch_persistent_context(
             str(SESSION_DIR),
             headless=False,
-            slow_mo=80,
+            slow_mo=60,
             viewport={"width": 1280, "height": 900},
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
-            )
+            ),
+            args=["--disable-blink-features=AutomationControlled"],
         )
 
         page = await context.new_page()
 
-        # Check if already logged in from a previous run
-        await page.goto("https://www.pinterest.com/", wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(1500)
-
-        if "/login" in page.url or "/signup" in page.url:
-            await wait_for_login(page)
-        else:
-            print("[+] Already logged in from saved session.\n")
-
-        # Scan existing boards
         try:
-            existing = await get_existing_boards(page)
+            await ensure_logged_in(page)
         except RuntimeError as e:
             print(f"[ERROR] {e}")
             await context.close()
             return
 
+        existing = await get_existing_boards(page)
         to_create = [n for n in BOARDS if n.lower() not in existing]
 
         if not to_create:
@@ -194,7 +205,7 @@ async def main():
                 created += 1
             else:
                 failed += 1
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(800)
 
         print("\n" + "=" * 60)
         print(f"  Done — {created} created, {failed} failed, {len(existing)} already existed.")

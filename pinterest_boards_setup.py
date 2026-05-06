@@ -107,8 +107,8 @@ async def ensure_logged_in(page: Page):
 
 
 async def get_existing_boards(page: Page) -> set:
-    await page.goto("https://www.pinterest.com/me/boards/", wait_until="networkidle", timeout=30000)
-    await page.wait_for_timeout(2000)
+    await page.goto("https://www.pinterest.com/me/boards/", wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_timeout(4000)
 
     # Scroll to load all boards
     for _ in range(8):

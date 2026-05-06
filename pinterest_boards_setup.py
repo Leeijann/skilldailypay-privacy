@@ -115,102 +115,95 @@ async def get_existing_boards(page: Page) -> set:
         await page.keyboard.press("End")
         await page.wait_for_timeout(600)
 
+    # Use Pinterest's internal API to get boards reliably
+    boards_data = await page.evaluate("""
+        async () => {
+            try {
+                const resp = await fetch('/resource/BoardResource/get/?source_url=%2Fme%2Fboards%2F&data=%7B%22options%22%3A%7B%22field_set_key%22%3A%22detailed%22%7D%7D', {
+                    credentials: 'include'
+                });
+                const json = await resp.json();
+                return (json?.resource_response?.data || []).map(b => b.name);
+            } catch(e) {
+                return [];
+            }
+        }
+    """)
+
+    if boards_data:
+        names = {n.lower() for n in boards_data}
+        print(f"[+] Found {len(names)} existing board(s) via API.")
+        return names
+
+    # Fallback: scrape from DOM
     board_els = await page.query_selector_all(
-        '[data-test-id="board-card-title"], [data-test-id="boardName"], '
-        'div[class*="boardName"], h3'
+        '[data-test-id="board-card-title"], [data-test-id="boardName"], h3'
     )
     names = set()
     for el in board_els:
         text = (await el.inner_text()).strip()
         if text:
             names.add(text.lower())
-
-    print(f"[+] Found {len(names)} existing board(s) on your profile.")
+    print(f"[+] Found {len(names)} existing board(s) from DOM.")
     return names
 
 
-async def debug_page_elements(page: Page):
-    """Print all buttons/interactive elements on the current page for debugging."""
-    elements = await page.evaluate("""
-        () => {
-            const els = document.querySelectorAll(
-                'button, [role="button"], a, input, [data-test-id]'
-            );
-            return [...els].slice(0, 40).map(el => ({
-                tag:    el.tagName,
-                text:   el.textContent.trim().slice(0, 60),
-                aria:   el.getAttribute('aria-label'),
-                testId: el.getAttribute('data-test-id'),
-                href:   el.getAttribute('href'),
-                type:   el.getAttribute('type'),
-            }));
-        }
-    """)
-    print("\n  [DEBUG] Elements found on page:")
-    for el in elements:
-        print(f"    tag={el['tag']} testId={el['testId']!r} aria={el['aria']!r} text={el['text']!r}")
-    await page.screenshot(path="debug_screenshot.png")
-    print("  [DEBUG] Screenshot saved to debug_screenshot.png\n")
-
-
 async def create_board(page: Page, name: str) -> bool:
+    """Create a board using Pinterest's internal fetch API from inside the browser."""
     try:
-        await page.goto("https://www.pinterest.com/me/boards/", wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(3000)
+        result = await page.evaluate("""
+            async (boardName) => {
+                // Get CSRF token from cookies
+                const csrfToken = document.cookie
+                    .split(';')
+                    .map(c => c.trim())
+                    .find(c => c.startsWith('csrftoken='))
+                    ?.split('=')[1] || '';
 
-        # Try to click the create board button via JavaScript (handles dynamic selectors)
-        clicked = await page.evaluate("""
-            () => {
-                const candidates = [
-                    ...document.querySelectorAll('button, [role="button"], a, div, svg')
-                ];
-                for (const el of candidates) {
-                    const aria  = (el.getAttribute('aria-label') || '').toLowerCase();
-                    const testId = (el.getAttribute('data-test-id') || '').toLowerCase();
-                    const text  = (el.textContent || '').trim().toLowerCase();
-                    if (
-                        aria.includes('create board') || aria.includes('add board') ||
-                        testId.includes('create-board') || testId.includes('board-create') ||
-                        text === 'create board' || text === '+'
-                    ) {
-                        el.click();
-                        return aria || testId || text;
-                    }
+                const payload = new URLSearchParams({
+                    source_url: '/me/boards/',
+                    data: JSON.stringify({
+                        options: {
+                            name: boardName,
+                            privacy: 'public',
+                            category: 'other'
+                        },
+                        context: {}
+                    }),
+                    _: Date.now().toString()
+                });
+
+                const resp = await fetch('/resource/BoardResource/create/', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'X-CSRFToken': csrfToken,
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'X-APP-VERSION': window.__app_version__ || '',
+                        'Referer': 'https://www.pinterest.com/me/boards/'
+                    },
+                    body: payload.toString()
+                });
+
+                const json = await resp.json();
+                if (json?.resource_response?.data?.id) {
+                    return { ok: true, id: json.resource_response.data.id };
                 }
-                return null;
+                return { ok: false, error: JSON.stringify(json?.resource_response?.error || json) };
             }
-        """)
+        """, name)
 
-        if not clicked:
-            print(f"  [!] Could not find Create Board button for '{name}'")
-            await debug_page_elements(page)
+        if result and result.get('ok'):
+            print(f"  [+] Created: {name} (id={result.get('id')})")
+            await page.wait_for_timeout(500)
+            return True
+        else:
+            print(f"  [!] Failed '{name}': {result.get('error', 'unknown')}")
             return False
 
-        print(f"  [*] Clicked create button ({clicked})")
-        await page.wait_for_timeout(2000)
-
-        # Fill in board name
-        name_input = await page.wait_for_selector(
-            'input[name="boardName"], input[id="boardEditName"], '
-            'input[placeholder*="oard"], input[placeholder*="Name"], '
-            'input[type="text"]',
-            timeout=8000
-        )
-        await name_input.click()
-        await name_input.fill(name)
-        await page.wait_for_timeout(500)
-
-        # Submit
-        submit = page.locator(
-            'button[type="submit"], button:has-text("Create"), button:has-text("Done")'
-        ).first
-        await submit.click(timeout=6000)
-        await page.wait_for_timeout(2000)
-
-        print(f"  [+] Created: {name}")
-        return True
     except Exception as e:
-        print(f"  [!] Failed '{name}': {e}")
+        print(f"  [!] Exception for '{name}': {e}")
         return False
 
 
